@@ -3,6 +3,15 @@
     <head>
         <title>Audio Visualizer</title>
         <script type="text/javascript">
+let freqs, lastFreqs;
+const ipcRenderer = require("electron").ipcRenderer;
+ipcRenderer.on("frequency-data", (e, data) => {
+    freqs = data;
+    if (!lastFreqs) {
+        lastFreqs = freqs;
+    }
+});
+
 let cvElem, dbElem, cvCtx, dbCtx;
 let width, height, radius;
 window.addEventListener("load", () => {
@@ -49,47 +58,50 @@ function restoreTransform() {
 }
 
 function drawVisualization() {
-    // PLACEHOLDER VISUALIZATION
     const ctx = dbCtx;
-    const offset = Date.now() * 0.004;
-    const segments = 10;
+    const offset = 0;// Date.now() * 0.002;
 
     ctx.strokeStyle = "blue";
-    ctx.lineWidth = 3;
+    ctx.lineWidth = 1;
     ctx.beginPath();
-    [0.9, 1.1].forEach(side => {
-        for (let i = 0; i <= segments; i++) {
-            const angle0 = (i + 0.00) / segments * 2.0 * Math.PI + offset;
-            const angle1 = (i + 0.25) / segments * 2.0 * Math.PI + offset;
-            const angle2 = (i + 0.50) / segments * 2.0 * Math.PI + offset;
-            const angle3 = (i + 0.85) / segments * 2.0 * Math.PI + offset;
-            const angle4 = (i + 1.00) / segments * 2.0 * Math.PI + offset;
-            if (i === 0) {
-                ctx.moveTo(radius * Math.cos(angle0), radius * Math.sin(angle0));
+    if (freqs && freqs.length) {
+        // Limit data
+        let freqlimit = Math.floor(freqs.length / 8);
+        let totallimit = freqlimit * 2;
+        let minlimit = 30;
+        let maxlimit = 120;
+        freqs.copyWithin(freqlimit, 1, freqlimit+5);
+        // Blur
+        freqs = freqs.map((f, i) => {
+            if (i <= 1) {
+                return lastFreqs[i] / 2.0 + (freqs[i] + freqs[i+2]) / 4.0;
             }
-            if (i === 1) {
-                const cpradius = radius / Math.cos(0.25 / segments * 2.0 * Math.PI);
-                const pkradius = radius * side;
-                ctx.bezierCurveTo(
-                    cpradius * Math.cos(angle1), cpradius * Math.sin(angle1),
-                    pkradius * Math.cos(angle1), pkradius * Math.sin(angle1),
-                    pkradius * Math.cos(angle2), pkradius * Math.sin(angle2)
-                );
-                ctx.bezierCurveTo(
-                    pkradius * Math.cos(angle3), pkradius * Math.sin(angle3),
-                    cpradius * Math.cos(angle3), cpradius * Math.sin(angle3),
-                    radius * Math.cos(angle4),   radius * Math.sin(angle4)
-                );
+            else if (i > totallimit) {
+                return lastFreqs[i] / 2.0 + (freqs[i-2] + freqs[i]) / 4.0;
             }
             else {
-                const cpradius = radius / Math.cos(0.5 / segments * 2.0 * Math.PI);
+                return lastFreqs[i] / 2.0 + (freqs[i-2] + freqs[i] + freqs[i+2]) / 6.0;
+            }
+        });
+        freqs[totallimit] = freqs[0];
+        lastFreqs = freqs;
+        // Double pass
+        for (let i = 0; i < totallimit + 1; i+=4) {
+            const angle = i / freqlimit * 2.0 * Math.PI + offset;
+            const anglep = (i - 2) / freqlimit * 2.0 * Math.PI + offset;
+            const r = freqs[i] / 255 * (maxlimit - minlimit) + minlimit;
+            const rp = freqs[i - 2] / 255 * (maxlimit - minlimit) + minlimit;
+            if (i === 0) {
+                ctx.moveTo(r * Math.cos(angle), r * Math.sin(angle));
+            }
+            else {
                 ctx.quadraticCurveTo(
-                    cpradius * Math.cos(angle2), cpradius * Math.sin(angle2),
-                    radius * Math.cos(angle4), radius * Math.sin(angle4)
+                    rp * Math.cos(anglep), rp * Math.sin(anglep),
+                    r * Math.cos(angle), r * Math.sin(angle)
                 );
             }
         }
-    });
+    }
     ctx.stroke();
 }
 

@@ -20,6 +20,10 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="AudioCapture.cpp" />
+    <ClCompile Include="easywsclient.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="easywsclient.hpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <ProjectGuid>{1CF8C176-BE55-4385-8014-B69C0D44851C}</ProjectGuid>

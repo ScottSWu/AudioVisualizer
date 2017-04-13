@@ -1,8 +1,36 @@
+#include <WinSock2.h>
 #include <Windows.h>
 #include <mmdeviceapi.h>
 #include <Audioclient.h>
 
 #include <stdio.h>
+#include <complex>
+#include <valarray>
+
+#include "easywsclient.hpp"
+
+const double PI = 3.141592653589793238460;
+
+void fft(std::valarray<std::complex<double>>& x) {
+	const size_t N = x.size();
+	if (N <= 1) return;
+
+	// divide
+	std::valarray<std::complex<double>> even = x[std::slice(0, N / 2, 2)];
+	std::valarray<std::complex<double>>  odd = x[std::slice(1, N / 2, 2)];
+
+	// conquer
+	fft(even);
+	fft(odd);
+
+	// combine
+	for (size_t k = 0; k < N / 2; ++k)
+	{
+		std::complex<double> t = std::polar(1.0, -2 * PI * k / N) * odd[k];
+		x[k] = even[k] + t;
+		x[k + N / 2] = even[k] - t;
+	}
+}
 
 #define REFTIMES_PER_SEC  10000000
 #define REFTIMES_PER_MILLISEC  10000
@@ -18,7 +46,11 @@ const IID IID_IMMDeviceEnumerator = __uuidof(IMMDeviceEnumerator);
 const IID IID_IAudioClient = __uuidof(IAudioClient);
 const IID IID_IAudioCaptureClient = __uuidof(IAudioCaptureClient);
 
-HRESULT RecordAudioStream(FILE * fout)
+using easywsclient::WebSocket;
+
+#define FFTSIZE 2048
+
+HRESULT RecordAudioStream(WebSocket::pointer ws)
 {
 	HRESULT hr;
 	REFERENCE_TIME hnsRequestedDuration = REFTIMES_PER_SEC;
@@ -34,6 +66,8 @@ HRESULT RecordAudioStream(FILE * fout)
 	BOOL bDone = FALSE;
 	BYTE *pData;
 	DWORD flags;
+
+	std::valarray<std::complex<double>> signal(std::complex<double>(0.0, 0.0), FFTSIZE);
 
 	hr = CoCreateInstance(
 		CLSID_MMDeviceEnumerator, NULL,
@@ -99,79 +133,24 @@ HRESULT RecordAudioStream(FILE * fout)
 	printf("pcm:       %08x %04x %04x\n",
 		KSDATAFORMAT_SUBTYPE_PCM.Data1, KSDATAFORMAT_SUBTYPE_PCM.Data2,
 		KSDATAFORMAT_SUBTYPE_PCM.Data3);
+	int threshold = pwfx->nSamplesPerSec / 30;
 	
 	// Calculate the actual duration of the allocated buffer.
 	hnsActualDuration = (REFERENCE_TIME)((double)REFTIMES_PER_SEC * bufferFrameCount / pwfx->nSamplesPerSec);
-
-	// Write Wave file headers
-	char WavChunkID[] = "RIFF";
-	char WavFormat[] = "WAVE";
-	char WavSubchunk1ID[] = "fmt ";
-	char WavSubchunk2ID[] = "data";
-
-	short WavAudioFormat = pwfx->wFormatTag;
-
-	int WavSampleRate = pwfx->nSamplesPerSec;
-	short WavNumChannels = pwfx->nChannels;
-	short WavBitsPerSample = pwfx->wBitsPerSample;
-	short WavBlockAlign = pwfx->nBlockAlign;
-	int WavByteRate = WavSampleRate * WavNumChannels * WavBitsPerSample / 8;
-
-	short WavExtraSize = pwfx->cbSize;
-	short WavValidBitsPerSample = pwfex->Samples.wValidBitsPerSample;
-	int WavChannelMask = pwfex->dwChannelMask;
-	long WavSubFormat1 = pwfex->SubFormat.Data1;
-	short WavSubFormat2 = pwfex->SubFormat.Data2;
-	short WavSubFormat3 = pwfex->SubFormat.Data3;
-	unsigned char * WavSubFormat4 = pwfex->SubFormat.Data4;
-
-	int WavSubchunk1Size = 18 + WavExtraSize;
-	int WavSubchunk2Size = WavSampleRate * 2 * WavNumChannels * WavBitsPerSample / 8;
-	int WavChunkSize = 36 + WavSubchunk2Size;
-
-	// RIFF WAVE header
-	fwrite(WavChunkID, 1, 4, fout);
-	fwrite(&WavChunkSize, 4, 1, fout);
-	fwrite(WavFormat, 1, 4, fout);
-
-	// Subchunk 1 format
-	fwrite(WavSubchunk1ID, 1, 4, fout);
-	fwrite(&WavSubchunk1Size, 4, 1, fout);
-	fwrite(&WavAudioFormat, 2, 1, fout);
-	fwrite(&WavNumChannels, 2, 1, fout);
-	fwrite(&WavSampleRate, 4, 1, fout);
-	fwrite(&WavByteRate, 4, 1, fout);
-	fwrite(&WavBlockAlign, 2, 1, fout);
-	fwrite(&WavBitsPerSample, 2, 1, fout);
-
-	// Extensible
-	fwrite(&WavExtraSize, 2, 1, fout);
-	fwrite(&WavValidBitsPerSample, 2, 1, fout);
-	fwrite(&WavChannelMask, 4, 1, fout);
-	fwrite(&WavSubFormat1, 4, 1, fout);
-	fwrite(&WavSubFormat2, 2, 1, fout);
-	fwrite(&WavSubFormat3, 2, 1, fout);
-	fwrite(WavSubFormat4, 1, 8, fout);
-
-	// Subchunk 2 data
-	fwrite(WavSubchunk2ID, 1, 4, fout);
-	fwrite(&WavSubchunk2Size, 4, 1, fout);
 
 	hr = pAudioClient->Start();  // Start recording.
 	EXIT_ON_ERROR(hr);
 
 	// Each loop fills about half of the shared buffer.
-	int recordedSamples = 0;
-	while (bDone == FALSE && recordedSamples < 44100 * 2)
-	{
-		// Sleep for half the buffer duration.
-		Sleep((DWORD)(hnsActualDuration / REFTIMES_PER_MILLISEC / 2));
+	int capturedFrames = 0;
+	while (bDone == FALSE) {
+		// Sleep for a bit
+		Sleep(10);
 
 		hr = pCaptureClient->GetNextPacketSize(&packetLength);
 		EXIT_ON_ERROR(hr);
 
-		while (packetLength != 0)
-		{
+		while (packetLength != 0) {
 			// Get the available data in the shared buffer.
 			hr = pCaptureClient->GetBuffer(
 				&pData,
@@ -179,25 +158,50 @@ HRESULT RecordAudioStream(FILE * fout)
 				&flags, NULL, NULL);
 			EXIT_ON_ERROR(hr);
 
-			if (flags & AUDCLNT_BUFFERFLAGS_SILENT)
-			{
+			if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
 				pData = NULL;  // Tell CopyData to write silence.
 			}
 
 			// Write the available capture data to the wave
 			if (pData != NULL) {
-				/*
-				if (recordedSamples > 20000 && recordedSamples < 20500) {
-					for (int i = 0; i < numFramesAvailable; i++) {
-						for (int j = 0; j < WavBlockAlign; j++) {
-							printf("%02x ", pData[i*WavBlockAlign + j]);
-						}
-						printf("\n");
+				// Combine channels and convert data to complex float
+				signal = signal.shift(numFramesAvailable);
+				int channels = pwfx->nChannels;
+				int bps = pwfx->wBitsPerSample / 8;
+				for (unsigned int i = 0; i < numFramesAvailable; i++) {
+					float sum = 0.f;
+					for (int j = 0; j < pwfx->nChannels; j++) {
+						int offset = i * channels + j;
+						sum += ((float*)pData)[offset];
 					}
+					signal[signal.size() - numFramesAvailable - 1 + i] = std::complex<double>(sum);
 				}
-				*/
-				fwrite(pData, 1, numFramesAvailable * WavBlockAlign, fout);
-				recordedSamples += numFramesAvailable;
+
+				// Only process and send data every few milliseconds
+				capturedFrames += numFramesAvailable;
+				if (ws && capturedFrames > threshold) {
+					// Reset captured frames
+					capturedFrames = 0;
+
+					// Compute fft
+					std::valarray<std::complex<double>> freqs = signal;
+					fft(freqs);
+
+					// Convert to byte array
+					std::vector<unsigned char> data(freqs.size());
+					for (int i = 0; i < freqs.size(); i++) {
+						double mag = log10(sqrt(freqs[i].real() * freqs[i].real() + freqs[i].imag() * freqs[i].imag()));
+						// Map 0 to 4 to 0 to 255
+						int normalized = (int)((mag + 1) * 255 / 4);
+						if (normalized > 255) normalized = 255;
+						if (normalized < 0) normalized = 0;
+						data[i] = (unsigned char)normalized;
+					}
+
+					// Send over websockets
+					ws->sendBinary(data);
+					ws->poll();
+				}
 			}
 
 			hr = pCaptureClient->ReleaseBuffer(numFramesAvailable);
@@ -222,10 +226,13 @@ Exit:
 }
 
 int main() {
+	// Initialize winsock
+	WSADATA data;
+	WSAStartup(MAKEWORD(2, 2), &data);
+	// Initialize wasapi
 	CoInitialize(NULL);
-	FILE * f;
-	fopen_s(&f, "test.wav", "wb");
-	RecordAudioStream(f);
-	fclose(f);
+	// Initialize websocket
+	WebSocket::pointer ws = WebSocket::from_direct("localhost", 9000, "");
+	RecordAudioStream(ws);
 	return 0;
 }
